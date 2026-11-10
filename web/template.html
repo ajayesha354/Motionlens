@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IMU Activity Lab: movement recognition and loading from wearable sensors</title>
+<style>
+:root{--bg:#fafaf8;--fg:#1c1e23;--mut:#677084;--card:#f0f1ee;--line:#d9dbd6;--acc:#2f5bea;--accfg:#fff;--bad:#b45309;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14161a;--fg:#eceef2;--mut:#98a2b3;--card:#20242b;--line:#363b44;--acc:#8aa6ff;--accfg:#10131a;--bad:#fbbf24}}
+:root[data-theme="dark"]{--bg:#14161a;--fg:#eceef2;--mut:#98a2b3;--card:#20242b;--line:#363b44;--acc:#8aa6ff;--accfg:#10131a;--bad:#fbbf24}
+*{box-sizing:border-box}html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:900px;margin:0 auto;padding:26px 16px 60px}
+h1{font-size:1.65rem;margin:0}h2{font-size:1.1rem;margin:26px 0 8px}.sub,.mut{color:var(--mut)}.sub{margin:4px 0 18px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+.drop{border:2px dashed var(--line);border-radius:12px;padding:20px;text-align:center;cursor:pointer;color:var(--mut)}.drop.on{border-color:var(--acc);color:var(--fg)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+select,input,button{font:inherit;padding:8px 11px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+button{cursor:pointer}button.p{background:var(--acc);color:var(--accfg);border-color:var(--acc);font-weight:600}button:disabled{opacity:.5;cursor:default}
+details{margin-top:12px}summary{cursor:pointer;color:var(--mut)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:10px}.grid label{display:flex;flex-direction:column;font-size:.82rem;color:var(--mut);gap:3px}
+#status{margin-top:10px;color:var(--mut);min-height:1.3em}#warn div{color:var(--bad);margin-top:4px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}.c{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.c b{display:block;font-size:1.25rem}.c span{font-size:.78rem;color:var(--mut)}
+canvas{width:100%;display:block;border-radius:10px;background:var(--card);border:1px solid var(--line)}
+#tip{min-height:1.4em;font-size:.85rem;color:var(--mut);margin-top:4px}
+.leg{display:flex;gap:12px;flex-wrap:wrap;font-size:.82rem;margin-top:6px}.leg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.88rem}th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th:first-child,td:first-child{text-align:left}
+.cm td{text-align:center;padding:5px 7px;border:1px solid var(--line)}
+.bar{height:8px;border-radius:4px;background:var(--acc);opacity:.8}
+footer{color:var(--mut);font-size:.84rem;margin-top:30px}
+</style></head><body><main>
+<h1>IMU Activity Lab</h1>
+<p class="sub">Upload accelerometer (and optionally gyroscope) data. A 1D convolutional network trained on public data recognises the movement and a loading proxy is computed. Everything runs in your browser.</p>
+
+<section class="panel">
+ <div class="drop" id="drop" tabindex="0">Drop a CSV here, or click to choose<br><small id="fname">Needs a time column or a known sampling rate, plus ax, ay, az (and gx, gy, gz for the best model)</small></div>
+ <input id="file" type="file" accept=".csv,.txt,.tsv" hidden>
+ <div class="row"><button class="p" id="demo">Run demo session</button><button id="go" disabled>Analyse file</button><span class="mut" id="dnote"></span></div>
+ <details id="map" hidden><summary>Column mapping, units and model</summary><div class="grid" id="mg"></div></details>
+ <div id="status" role="status"></div><div id="warn"></div>
+</section>
+
+<section id="res" hidden>
+ <div class="cards" id="cards"></div>
+ <h2>Timeline</h2><canvas id="cv" height="230"></canvas><div id="tip"></div><div class="leg" id="leg"></div>
+ <h2>Time and mechanical loading by activity</h2><div class="tw"><table id="tb"></table></div>
+ <p class="mut" style="font-size:.84rem">Loading figures are mechanical proxies computed from acceleration at the sensor (accumulated acceleration change, peak acceleration, rhythm). They are not joint forces or moments. One rhythm cycle is about two steps when walking. The index (0 to 100) is the percentile of the loading rate among about 13,000 reference windows from 16 people.</p>
+ <div class="row"><button id="ecsv">Download window table (CSV)</button><button id="ejson">Download report (JSON)</button></div>
+</section>
+
+<section>
+ <h2>Model card</h2><div id="mc"></div>
+ <p class="mut" style="font-size:.84rem"><b>Limits.</b> Trained on MotionSense: 24 adults, iPhone in the front trouser pocket, 50 Hz, six activities (walking, jogging, up and down stairs, sitting, standing). Other sensor placements, other activities (for example squats, cycling, driving) and very different gait (injury, children, older adults) will be misclassified or flagged as low confidence. The gravity direction is part of the input, so mounting orientation matters.</p>
+</section>
+<footer>Model and data processing: see the project README. Dataset: Malekzadeh et al., MotionSense (MIT licence). Your file is not uploaded anywhere.</footer>
+
+<script>
+/*LOGIC-START*/
+const D=/*DATA*/null;
+const FS=50,WIN=128,STRIDE=64,GH=50,NAMES=["Downstairs","Upstairs","Walking","Jogging","Sitting","Standing"],COL=["#e4572e","#f3a712","#29a366","#d1316b","#5b7fff","#8a63d2"];
+function parseCSV(t){t=t.replace(/^\uFEFF/,"").trim();const L=t.split(/\r?\n/);
+ const sep=[",",";","\t"].reduce((b,s)=>{const n=L[0].split(s).length;return n>b[1]?[s,n]:b},[",",1])[0];
+ let head=L[0].split(sep).map((h,i)=>h.trim().replace(/^"|"$/g,"")||"col"+(i+1)),st=1;
+ if(head.every(h=>h!==""&&!isNaN(+h))){head=head.map((_,i)=>"col"+(i+1));st=0}
+ const cols=head.map(()=>[]);
+ for(let i=st;i<L.length;i++){const p=L[i].split(sep);if(p.length<head.length)continue;for(let j=0;j<head.length;j++)cols[j].push(parseFloat(p[j]))}
+ return{head,cols}}
+function detect(head){const n=head.map(h=>h.toLowerCase().replace(/[^a-z0-9]/g,"")),m={t:-1,a:[-1,-1,-1],g:[-1,-1,-1],grav:null,userAcc:false};
+ m.t=n.findIndex(h=>/^(time|timestamp|t|sec|seconds|times|elapsed|ms)/.test(h));
+ ["x","y","z"].forEach((ax,i)=>{
+  const f=fn=>n.findIndex(h=>h.endsWith(ax)&&fn(h));
+  let a=f(h=>/acc/.test(h)&&!/gyr|rot|grav|user|linear/.test(h));
+  if(a<0)a=n.findIndex(h=>h==="a"+ax);
+  if(a<0){a=f(h=>/acc/.test(h)&&/user|linear/.test(h)&&!/gyr|rot/.test(h));if(a>=0)m.userAcc=true}
+  m.a[i]=a;
+  let g=f(h=>/gyr|rotationrate|angvel/.test(h));if(g<0)g=n.findIndex(h=>h==="g"+ax);m.g[i]=g});
+ const gr=["x","y","z"].map(ax=>n.findIndex(h=>h.endsWith(ax)&&/grav/.test(h)));if(gr.every(i=>i>=0))m.grav=gr;
+ if(m.userAcc&&!m.grav)m.userAcc="nograv";return m}
+function median(a){const s=Float64Array.from(a).sort();return s[s.length>>1]}
+function resample(cs,t){const n=Math.floor((t[t.length-1]-t[0])*FS)+1,out=cs.map(()=>new Float64Array(n));let k=0;
+ for(let i=0;i<n;i++){const x=t[0]+i/FS;while(k<t.length-2&&t[k+1]<x)k++;const w=(x-t[k])/(t[k+1]-t[k]);cs.forEach((c,j)=>out[j][i]=c[k]+(c[k+1]-c[k])*Math.min(Math.max(w,0),1))}return out}
+function movingMean(x,n,c){const cs=new Float64Array((n+1)*c),o=new Float64Array(n*c);
+ for(let i=0;i<n;i++)for(let j=0;j<c;j++)cs[(i+1)*c+j]=cs[i*c+j]+x[j][i];
+ for(let i=0;i<n;i++){const lo=Math.max(i-GH,0),hi=Math.min(i+GH+1,n);for(let j=0;j<c;j++)o[i*c+j]=(cs[hi*c+j]-cs[lo*c+j])/(hi-lo)}return o}
+function conv(h,L,ci,w,b,k,co){const o=new Float32Array(L*co),left=(k-1)>>1;
+ for(let t=0;t<L;t++){const ob=t*co;for(let c=0;c<co;c++)o[ob+c]=b[c];
+  for(let j=0;j<k;j++){const s=t+j-left;if(s<0||s>=L)continue;for(let i=0;i<ci;i++){const v=h[s*ci+i];if(v===0)continue;const wo=(j*ci+i)*co;for(let c=0;c<co;c++)o[ob+c]+=v*w[wo+c]}}
+  for(let c=0;c<co;c++)if(o[ob+c]<0)o[ob+c]=0}return o}
+function pool(h,L,c){const o=new Float32Array((L>>1)*c);for(let t=0;t<L>>1;t++)for(let j=0;j<c;j++)o[t*c+j]=Math.max(h[2*t*c+j],h[(2*t+1)*c+j]);return o}
+function forward(M,x){let h=x,L=WIN,ci=M.layers[0].shape[1];
+ for(let i=0;i<5;i++){const l=M.layers[i],[k,,co]=l.shape;h=conv(h,L,ci,l.w,l.b,k,co);ci=co;if(i===1||i===3){h=pool(h,L,ci);L>>=1}}
+ const f=new Float32Array(2*ci).fill(0);for(let j=0;j<ci;j++){let s=0,mx=-1e30;for(let t=0;t<L;t++){const v=h[t*ci+j];s+=v;if(v>mx)mx=v}f[j]=s/L;f[ci+j]=mx}
+ const l=M.layers[5],o=new Float64Array(6);for(let c=0;c<6;c++){let s=l.b[c];for(let j=0;j<2*ci;j++)s+=f[j]*l.w[j*6+c];o[c]=s}return o}
+function logSoftmax(v,T){const z=Array.from(v,x=>x/T),m=Math.max(...z),s=Math.log(z.reduce((a,x)=>a+Math.exp(x-m),0))+m;return z.map(x=>x-s)}
+function viterbi(lp,stay){const T=lp.length,K=6,off=Math.log((1-stay)/(K-1)),ls=Math.log(stay),sc=Array.from(lp[0]),bk=[];
+ for(let t=1;t<T;t++){const nb=new Int8Array(K),ns=new Array(K);
+  for(let j=0;j<K;j++){let b=0,bv=-1e30;for(let i=0;i<K;i++){const v=sc[i]+(i===j?ls:off);if(v>bv){bv=v;b=i}}nb[j]=b;ns[j]=bv+lp[t][j]}
+  bk.push(nb);for(let j=0;j<K;j++)sc[j]=ns[j]}
+ const p=new Array(T);let b=0;for(let j=1;j<K;j++)if(sc[j]>sc[b])b=j;p[T-1]=b;for(let t=T-1;t>0;t--)p[t-1]=bk[t-1][p[t]];return p}
+function winLoad(u,s){// u: samples x 3 (Float32Array), window start s
+ let ds=0,pk=0;const mag=new Float64Array(WIN);
+ for(let i=0;i<WIN;i++){const a=u[(s+i)*3],b=u[(s+i)*3+1],c=u[(s+i)*3+2];mag[i]=Math.hypot(a,b,c);if(mag[i]>pk)pk=mag[i];
+  if(i>0)ds+=Math.hypot(a-u[(s+i-1)*3],b-u[(s+i-1)*3+1],c-u[(s+i-1)*3+2])}
+ let mu=0;for(const v of mag)mu+=v;mu/=WIN;const z=Array.from(mag,v=>v-mu),lo=12,hi=75;let ac0=0;for(let i=0;i<WIN;i++)ac0+=z[i]*z[i];
+ let bl=-1,bv=-1e30;if(ac0>1e-9)for(let l=lo;l<=hi;l++){let s2=0;for(let i=0;i<WIN-l;i++)s2+=z[i]*z[i+l];if(s2>bv){bv=s2;bl=l}}
+ return{load:ds/((WIN-1)/FS),peak:pk,rhythm:(bl>0&&bv/ac0>0.2)?60*FS/bl:NaN}}
+function pctl(q,v){let c=0;for(const x of q)if(x<=v)c++;return Math.min(100,Math.max(0,100*(c-1)/(q.length-1)))}
+function timeScale(t){const dt=[];for(let i=1;i<Math.min(t.length,500);i++)if(t[i]>t[i-1])dt.push(t[i]-t[i-1]);const d=median(dt);
+ for(const s of [1,1e-3,1e-6,1e-9]){const f=1/(d*s);if(f>=5&&f<=1000)return s}return 1}
+function pipeline(cols,m,o){const nraw=cols[m.a[0]].length;
+ const T=m.t>=0&&!(o.fs>0)?cols[m.t].map(Number):null;const keep=[];let last=-Infinity,sc=1;
+ if(T){sc=timeScale(T)}
+ for(let i=0;i<nraw;i++){const row=[...m.a,...(o.useGyro?m.g:[])].map(j=>cols[j][i]);if(row.some(v=>!isFinite(v)))continue;
+  if(T){const tt=T[i]*sc;if(!(tt>last))continue;last=tt}keep.push(i)}
+ const n0=keep.length;if(n0<WIN)throw new Error("Need at least "+Math.ceil(WIN/FS*10)/10+" s of valid samples; found "+n0+".");
+ const f0=o.fs>0?o.fs:T?1/median(keep.slice(1).map((k,i)=>T[k]*sc-T[keep[i]]*sc)):FS;
+ let t=keep.map((k,i)=>T?T[k]*sc:i/f0);
+ let ch=[0,1,2].map(a=>Float64Array.from(keep,i=>cols[m.a[a]][i]));
+ if(m.userAcc===true&&m.grav)ch=ch.map((c,a)=>c.map((v,i)=>v+cols[m.grav[a]][keep[i]]));
+ const gy=o.useGyro?[0,1,2].map(a=>Float64Array.from(keep,i=>cols[m.g[a]][i])):null;
+ const mags=Float64Array.from(ch[0],(v,i)=>Math.hypot(v,ch[1][i],ch[2][i])),medA=median(mags),warn=[];
+ let ak=1;if(o.accUnit==="ms2"||(o.accUnit==="auto"&&medA>4)){ak=1/9.80665;}
+ else if(o.accUnit==="auto"&&medA<0.5)warn.push("Acceleration looks like it has no gravity component (median magnitude "+medA.toFixed(2)+"). Orientation information is missing, so accuracy will be lower. Use total acceleration if you can.");
+ ch=ch.map(c=>c.map(v=>v*ak));
+ let gk=1;if(gy){const p99=Float64Array.from(gy[0].map(Math.abs)).sort()[Math.floor(gy[0].length*.99)];if(o.gyroUnit==="deg"||(o.gyroUnit==="auto"&&p99>35))gk=Math.PI/180;}
+ let sig=[...ch,...(gy?gy.map(c=>c.map(v=>v*gk)):[])];
+ if(Math.abs(f0-FS)>0.5){sig=resample(sig,t);warn.push("Resampled from "+f0.toFixed(1)+" Hz to 50 Hz.")}
+ const n=sig[0].length,c=gy?9:6,gm=movingMean(sig.slice(0,3),n,3),M=gy?D.full:D.acc;
+ const x=new Float32Array(n*c);for(let i=0;i<n;i++){for(let j=0;j<3;j++){x[i*c+j]=sig[j][i]-gm[i*3+j];x[i*c+3+j]=gm[i*3+j];if(gy)x[i*c+6+j]=sig[3+j][i]}}
+ const u=new Float32Array(n*3);for(let i=0;i<n;i++)for(let j=0;j<3;j++)u[i*3+j]=x[i*c+j];
+ const ce=gy?7:5,xe=new Float32Array(n*ce);// gravity-aligned channels: [along-gravity, across-gravity] for acc (and gyro), then gravity
+ for(let i=0;i<n;i++){const g0=gm[i*3],g1=gm[i*3+1],g2=gm[i*3+2],gn=Math.max(Math.hypot(g0,g1,g2),1e-6),h=[g0/gn,g1/gn,g2/gn];
+  const sp=(a,b,d)=>{const v=a*h[0]+b*h[1]+d*h[2];return[v,Math.sqrt(Math.max(a*a+b*b+d*d-v*v,0))]};
+  let q=i*ce;const[uv,uh]=sp(x[i*c],x[i*c+1],x[i*c+2]);xe[q++]=uv;xe[q++]=uh;
+  if(gy){const[wv,wh]=sp(x[i*c+6],x[i*c+7],x[i*c+8]);xe[q++]=wv;xe[q++]=wh}
+  xe[q++]=g0;xe[q++]=g1;xe[q++]=g2}
+ let gmag=0;for(let i=0;i<n;i++)gmag+=Math.hypot(gm[i*3],gm[i*3+1],gm[i*3+2]);gmag/=n;
+ if(gmag<0.8||gmag>1.2)warn.push("Mean gravity magnitude is "+gmag.toFixed(2)+" g (expected about 1). Check the units and axes.");
+ if(n<WIN)throw new Error("Not enough data after resampling.");
+ const nw=Math.floor((n-WIN)/STRIDE)+1,lg=[],pr=[],ld=[];
+ for(let w=0;w<nw;w++){const xi=new Float32Array(WIN*ce);for(let i=0;i<WIN;i++)for(let j=0;j<ce;j++)xi[i*ce+j]=(xe[(w*STRIDE+i)*ce+j]-M.mean[j])/M.std[j];
+  const l=forward(M,xi);lg.push(l);pr.push(logSoftmax(l,M.T));ld.push(winLoad(u,w*STRIDE))}
+ const raw=pr.map(p=>p.indexOf(Math.max(...p))),sm=nw>1&&o.smooth?viterbi(pr,M.stay):raw.slice();
+ const conf=pr.map((p,i)=>Math.exp(p[sm[i]])),li=ld.map(l=>pctl(D.ref.all,l.load));
+ const low=conf.filter(v=>v<0.6).length;if(low>nw*0.25)warn.push("About "+Math.round(100*low/nw)+"% of windows have low confidence. The movement may differ from the training activities or the sensor placement may differ (the model expects a front trouser pocket).");
+ if(nw<5)warn.push("Very short recording: results are unreliable.");
+ return{n,nw,c,model:gy?"Accelerometer + gyroscope":"Accelerometer only",lg,pr,raw,sm,conf,ld,li,u,warn,f0,dur:n/FS}}
+function summarize(r){const act=NAMES.map((name,k)=>{const ix=[];r.sm.forEach((s,i)=>s===k&&ix.push(i));
+  const avg=a=>{const v=ix.map(i=>a(i)).filter(isFinite);return v.length?v.reduce((p,q)=>p+q,0)/v.length:NaN};
+  const ref=D.ref.act[name];return{name,k,n:ix.length,sec:ix.length*STRIDE/FS,load:avg(i=>r.ld[i].load),peak:avg(i=>r.ld[i].peak),rhythm:avg(i=>r.ld[i].rhythm),li:avg(i=>r.li[i]),conf:avg(i=>r.conf[i]),
+   vs:ix.length?avg(i=>r.ld[i].load)/ref.med_load:NaN}});
+ const tot=r.ld.reduce((s,l)=>s+l.load*STRIDE/FS,0);return{act,tot}}
+function toCSV(r){const L=["window,start_s,end_s,activity_raw,activity_smoothed,confidence,load_gps,peak_g,rhythm_cpm,load_index"];
+ for(let i=0;i<r.nw;i++){const l=r.ld[i];L.push([i,(i*STRIDE/FS).toFixed(2),((i*STRIDE+WIN)/FS).toFixed(2),NAMES[r.raw[i]],NAMES[r.sm[i]],r.conf[i].toFixed(3),l.load.toFixed(3),l.peak.toFixed(3),isFinite(l.rhythm)?l.rhythm.toFixed(1):"",r.li[i].toFixed(1)].join(","))}return L.join("\n")+"\n"}
+/*LOGIC-END*/
+
+const $=i=>document.getElementById(i),el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e};
+let parsed=null,fname="",last=null,downloads=null;
+const F=(v,d=1)=>isFinite(v)?v.toFixed(d):"-";
+function buildMap(){const mg=$("mg");mg.replaceChildren();const m=parsed.m;
+ const sel=(label,get,set)=>{const l=el("label",0,label),s=el("select");s.append(new Option("(none)",-1));parsed.head.forEach((h,i)=>s.append(new Option(h,i)));s.value=get();s.onchange=()=>set(+s.value);l.append(s);mg.append(l)};
+ sel("Time",()=>m.t,v=>m.t=v);["x","y","z"].forEach((a,i)=>sel("Accel "+a,()=>m.a[i],v=>m.a[i]=v));["x","y","z"].forEach((a,i)=>sel("Gyro "+a,()=>m.g[i],v=>m.g[i]=v));
+ const opt=(label,id,vals)=>{const l=el("label",0,label),s=el("select");s.id=id;vals.forEach(([v,t])=>s.append(new Option(t,v)));l.append(s);mg.append(l)};
+ opt("Accel unit","au",[["auto","Auto"],["g","g"],["ms2","m/s²"]]);opt("Gyro unit","gu",[["auto","Auto"],["rad","rad/s"],["deg","deg/s"]]);
+ opt("Model","mdl",[["auto","Auto"],["acc","Accelerometer only"]]);opt("Smooth over time","sm",[["off","Off"],["on","On"]]);
+ const l=el("label",0,"Sampling rate (Hz), blank = from time"),i=el("input");i.id="fs";i.type="number";i.min="1";l.append(i);mg.append(l)}
+async function take(f){$("status").textContent="Reading "+f.name+"...";$("warn").replaceChildren();
+ try{parsed=parseCSV(await f.text());if(parsed.head.length<4)throw new Error("Expected at least 4 columns (ax, ay, az plus time).");
+  parsed.m=detect(parsed.head);fname=f.name;buildMap();$("map").hidden=false;$("go").disabled=false;
+  const ok=parsed.m.a.every(i=>i>=0);$("map").open=!ok;$("fname").textContent=f.name+": "+parsed.cols[0].length.toLocaleString()+" rows"+(ok?"":" (check the column mapping)");
+  $("status").textContent=ok?"Ready. Press Analyse file.":"Could not find all accelerometer columns. Map them below."}
+ catch(e){$("status").textContent="";$("warn").append(el("div",0,e.message))}}
+const drop=$("drop");drop.onclick=()=>$("file").click();drop.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();$("file").click()}};
+$("file").onchange=e=>e.target.files[0]&&take(e.target.files[0]);
+["dragenter","dragover"].forEach(v=>drop.addEventListener(v,e=>{e.preventDefault();drop.classList.add("on")}));
+["dragleave","drop"].forEach(v=>drop.addEventListener(v,e=>{e.preventDefault();drop.classList.remove("on")}));
+drop.addEventListener("drop",e=>e.dataTransfer.files[0]&&take(e.dataTransfer.files[0]));
+async function analyse(){const m=parsed.m;$("warn").replaceChildren();$("go").disabled=$("demo").disabled=true;
+ if(m.a.some(i=>i<0)){$("warn").append(el("div",0,"Map the three accelerometer columns first."));$("go").disabled=$("demo").disabled=false;return}
+ $("status").textContent="Running the network...";await new Promise(r=>setTimeout(r,30));
+ try{const hasG=m.g.every(i=>i>=0),g=$("mdl")?$("mdl").value:"auto";
+  const o={accUnit:$("au")?$("au").value:"auto",gyroUnit:$("gu")?$("gu").value:"auto",fs:$("fs")?+$("fs").value:0,useGyro:hasG&&g!=="acc",smooth:$("sm")?$("sm").value==="on":false};
+  const r=pipeline(parsed.cols,m,o);last={r,s:summarize(r),name:fname};render(last);$("status").textContent="Done.";
+  r.warn.forEach(w=>$("warn").append(el("div",0,w)))}
+ catch(e){$("status").textContent="";$("warn").append(el("div",0,e.message||String(e)))}
+ finally{$("go").disabled=false;$("demo").disabled=false}}
+$("go").onclick=analyse;
+$("demo").onclick=()=>{parsed=parseCSV(D.demo);parsed.m=detect(parsed.head);fname="demo_session.csv";buildMap();$("map").hidden=false;$("fname").textContent="Demo: one held-out volunteer, stitched from separate trials (sit, stand, walk, stairs up and down, jog, walk, sit)";analyse()};
+$("dnote").textContent="The demo person was never used in training.";
+function render(L){const{r,s}=L;$("res").hidden=false;const top=s.act.reduce((a,b)=>b.n>a.n?b:a);
+ const cards=[["Duration",F(r.dur,0)+" s"],["Windows",r.nw+" × 2.56 s"],["Main activity",top.name],["Mean confidence",F(100*r.conf.reduce((a,b)=>a+b,0)/r.nw,0)+"%"],["Accumulated load",F(s.tot,0)+" g"],["Model",r.model]];
+ $("cards").replaceChildren(...cards.map(([k,v])=>{const c=el("div","c");c.append(el("b",0,v),el("span",0,k));return c}));
+ $("leg").replaceChildren(...NAMES.map((n,i)=>{const d=el("span");const b=el("i");b.style.background=COL[i];d.append(b,n);return d}));
+ const tb=$("tb");tb.replaceChildren();const h=el("tr");["Activity","Time (s)","Share","Confidence","Load (g/s)","Peak (g)","Rhythm (cycles/min)","Load index","vs typical"].forEach(x=>h.append(el("th",0,x)));tb.append(h);
+ s.act.filter(a=>a.n>0).forEach(a=>{const t=el("tr");const c0=el("td");const b=el("i");b.style.cssText="display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;background:"+COL[a.k];c0.append(b,a.name);t.append(c0);
+  const loc=a.k<4;[F(a.sec,0),F(100*a.n/r.nw,0)+"%",F(100*a.conf,0)+"%",F(a.load,2),F(a.peak,2),loc?F(a.rhythm,0):"-",F(a.li,0),loc?F(a.vs,2)+"×":"-"].forEach(x=>t.append(el("td",0,x)));tb.append(t)});
+ draw(L)}
+function draw(L){const cv=$("cv"),ctx=cv.getContext&&cv.getContext("2d");if(!ctx)return;const{r}=L,dpr=window.devicePixelRatio||1,W=cv.clientWidth||800,H=230;cv.width=W*dpr;cv.height=H*dpr;ctx.scale(dpr,dpr);
+ const cs=getComputedStyle(document.documentElement),fg=cs.getPropertyValue("--fg")||"#000",mut=cs.getPropertyValue("--mut")||"#888";ctx.clearRect(0,0,W,H);
+ const x=i=>i/r.n*W,wpx=Math.max(1,STRIDE/r.n*W);
+ for(let i=0;i<r.nw;i++){ctx.globalAlpha=0.3+0.7*r.conf[i];ctx.fillStyle=COL[r.sm[i]];ctx.fillRect(x(i*STRIDE),0,wpx+0.5,30);if(r.conf[i]<0.6){ctx.globalAlpha=1;ctx.fillStyle=mut;ctx.fillRect(x(i*STRIDE),26,wpx,4)}}
+ ctx.globalAlpha=1;ctx.fillStyle=mut;ctx.font="11px system-ui";ctx.fillText("Activity (faded = less confident)",4,44);
+ let mx=0;const mg=new Float32Array(r.n);for(let i=0;i<r.n;i++){mg[i]=Math.hypot(r.u[i*3],r.u[i*3+1],r.u[i*3+2]);if(mg[i]>mx)mx=mg[i]}mx=Math.max(mx,0.5);
+ ctx.fillText("Acceleration magnitude without gravity (g)",4,60);ctx.strokeStyle=fg;ctx.globalAlpha=.75;ctx.beginPath();
+ for(let px=0;px<W;px++){const a=Math.floor(px/W*r.n),b=Math.max(a+1,Math.floor((px+1)/W*r.n));let m=0;for(let i=a;i<b&&i<r.n;i++)if(mg[i]>m)m=mg[i];const y=140-m/mx*70;px?ctx.lineTo(px,y):ctx.moveTo(px,y)}ctx.stroke();ctx.globalAlpha=1;
+ ctx.fillStyle=mut;ctx.fillText("Loading index (0 to 100)",4,158);ctx.strokeStyle=COL[3];ctx.beginPath();
+ for(let i=0;i<r.nw;i++){const px=x(i*STRIDE+WIN/2),y=225-r.li[i]/100*55;i?ctx.lineTo(px,y):ctx.moveTo(px,y)}ctx.stroke();
+ cv.onmousemove=e=>{const px=e.offsetX/cv.clientWidth*r.n,i=Math.min(r.nw-1,Math.max(0,Math.floor((px-WIN/2)/STRIDE+0.5))),l=r.ld[i];
+  $("tip").textContent=(i*STRIDE/FS).toFixed(1)+" s: "+NAMES[r.sm[i]]+", confidence "+(100*r.conf[i]).toFixed(0)+"%, load "+l.load.toFixed(2)+" g/s, index "+r.li[i].toFixed(0)+(r.raw[i]!==r.sm[i]?" (raw model said "+NAMES[r.raw[i]]+")":"")}}
+window.addEventListener("resize",()=>last&&draw(last));
+async function save(name,data,mime){if(downloads){try{await downloads.save({filename:name,data});return}catch(e){if(e&&e.code==="declined")return}}
+ const a=el("a");a.href=URL.createObjectURL(new Blob([data],{type:mime}));a.download=name;document.body.append(a);a.click();a.remove()}
+$("ecsv").onclick=()=>last&&save("imu_windows.csv",toCSV(last.r),"text/csv");
+$("ejson").onclick=()=>last&&save("imu_report.json",JSON.stringify({file:last.name,model:last.r.model,duration_s:last.r.dur,accumulated_load_g:last.s.tot,activities:last.s.act.filter(a=>a.n>0).map(a=>({activity:a.name,seconds:a.sec,mean_confidence:a.conf,load_gps:a.load,peak_g:a.peak,rhythm_cpm:isFinite(a.rhythm)?a.rhythm:null,load_index:a.li,vs_typical:a.vs})),note:"Loading values are mechanical proxies, not joint forces."},null,1),"application/json");
+(function card(){const c=D.card,f=c.full,a=c.acc,mc=$("mc"),P=v=>(100*v).toFixed(1)+"%";
+ const rows=[["Model","Test accuracy","Macro F1","Per-person CV accuracy","Calibration error (ECE)","Stream accuracy raw / smoothed"],
+  ["CNN, accel + gyro",P(f.test_acc),f.test_macro_f1.toFixed(3),c.cv?P(c.cv.full.acc_mean)+" ± "+(100*c.cv.full.acc_sd).toFixed(1):"-",f.ece_calibrated.toFixed(3),P(f.stream_acc_unsmoothed)+" / "+P(f.stream_acc_viterbi)],
+  ["CNN, accel only",P(a.test_acc),a.test_macro_f1.toFixed(3),c.cv?P(c.cv.acc.acc_mean)+" ± "+(100*c.cv.acc.acc_sd).toFixed(1):"-",a.ece_calibrated.toFixed(3),P(a.stream_acc_unsmoothed)+" / "+P(a.stream_acc_viterbi)],
+  ["Random forest baseline, 9 ch",P(c.baseline["9"].test_acc),c.baseline["9"].test_f1.toFixed(3),P(c.baseline["9"].cv6_acc_mean)+" ± "+(100*c.baseline["9"].cv6_acc_sd).toFixed(1),"-","-"],
+  ["Random forest baseline, 6 ch",P(c.baseline["6"].test_acc),c.baseline["6"].test_f1.toFixed(3),P(c.baseline["6"].cv6_acc_mean)+" ± "+(100*c.baseline["6"].cv6_acc_sd).toFixed(1),"-","-"]];
+ const t=el("table"),w=el("div","tw");rows.forEach((r,i)=>{const tr=el("tr");r.forEach(x=>tr.append(el(i?"td":"th",0,x)));t.append(tr)});w.append(t);mc.append(w);
+ mc.append(el("p","mut","Accuracy varies a lot between people. Most people score above 95%, but a few with an unusual way of walking or carrying the phone score far lower, which is why the test figure sits below the cross-validated one. Smoothing over time did not help on the test streams, so it is off by default. Test = "+c.split.test.length+" people never seen in training ("+c.windows.test.toLocaleString()+" windows). Per-person CV = 6 folds, each tested on 4 unseen people. Stream accuracy uses synthetic multi-activity sequences."));
+ const cm=f.confusion,t2=el("table","cm");const hr=el("tr");hr.append(el("th",0,"true ↓ / predicted →"));NAMES.forEach(n=>hr.append(el("th",0,n.slice(0,5))));t2.append(hr);
+ cm.forEach((row,i)=>{const tr=el("tr");tr.append(el("td",0,NAMES[i]));const s=row.reduce((p,q)=>p+q,0)||1;row.forEach((v,j)=>{const td=el("td",0,(100*v/s).toFixed(0)+"%");td.style.background="color-mix(in srgb, var(--acc) "+Math.round(100*v/s*0.8)+"%, transparent)";tr.append(td)});t2.append(tr)});
+ const w2=el("div","tw");w2.append(el("h2",0,"Confusion matrix (accel + gyro model, test people, rows sum to 100%)"),t2);mc.append(w2)})();
+</script></main></body></html>
